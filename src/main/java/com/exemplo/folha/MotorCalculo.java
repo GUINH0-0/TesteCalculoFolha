@@ -10,28 +10,51 @@ import org.springframework.expression.spel.standard.SpelExpressionParser;
 import org.springframework.expression.spel.support.StandardEvaluationContext;
 
 import java.util.*;
+import java.util.stream.Collectors;
 
 public class MotorCalculo {
 
     private final SpelExpressionParser parser = new SpelExpressionParser();
 
-    // Aq ele analisa diretamente as strings para ver as variáveis e descobrir as dependências
+    // varre todos os nós do sistema, agrupa quem é PROVENTO e quem é DESCONTO,
+    // monta automaticamente as fórmulas de `total_proventos` e `total_descontos`.
+
+    public void injetarFormulasDeAgregacao(List<NoCalculo> todosOsNos) {
+        List<String> proventos = todosOsNos.stream()
+                .filter(n -> n.getTipo() == TipoRubrica.PROVENTO && n.getFormulaString() != null)
+                .map(n -> "#" + n.getNomeVariavel())
+                .collect(Collectors.toList());
+
+        List<String> descontos = todosOsNos.stream()
+                .filter(n -> n.getTipo() == TipoRubrica.DESCONTO && n.getFormulaString() != null)
+                .map(n -> "#" + n.getNomeVariavel())
+                .collect(Collectors.toList());
+
+        String formulaProventos = String.join(" + ", proventos);
+        String formulaDescontos = descontos.isEmpty() ? "0.0" : String.join(" + ", descontos);
+
+        for (NoCalculo no : todosOsNos) {
+            if ("total_proventos".equals(no.getNomeVariavel())) {
+                no.setFormulaString(formulaProventos);
+            } else if ("total_descontos".equals(no.getNomeVariavel())) {
+                no.setFormulaString(formulaDescontos);
+            }
+        }
+    }
+
+    // lê as strings pra descobrir quais variaveis cada nós usa e monstar as dependências
     public void mapearDependenciasDinamicamente(List<NoCalculo> todosOsNos) {
         for (NoCalculo noFilho : todosOsNos) {
             if (noFilho.getFormulaString() == null || noFilho.getFormulaString().trim().isEmpty()) {
                 continue;
             }
 
-            // Compara a fórmula do nó atual com o nome de todas as outras variáveis cadastradas no sistema
             for (NoCalculo noCandidatoPai : todosOsNos) {
                 if (noFilho.getNomeVariavel().equals(noCandidatoPai.getNomeVariavel())) {
-                    continue; // Uma variável não depende dela mesma
+                    continue;
                 }
 
-                // O padrão no SpEL para usar uma variável é #nome_variavel
                 String tokenVariavel = "#" + noCandidatoPai.getNomeVariavel();
-
-                // Se a string da fórmula contém a variável, criamos a dependência organicamente!
                 if (noFilho.getFormulaString().contains(tokenVariavel)) {
                     noFilho.adicionarDependencia(noCandidatoPai);
                 }
@@ -39,7 +62,8 @@ public class MotorCalculo {
         }
     }
 
-    // Parseia as fórmulas com o SPEL
+    // usa o SPEL pra parsear as formulas
+
     public void compilarFormulas(List<NoCalculo> nos) {
         for (NoCalculo no : nos) {
             if (no.getFormulaString() != null && !no.getFormulaString().trim().isEmpty()) {
@@ -48,8 +72,8 @@ public class MotorCalculo {
             }
         }
     }
+    // usa JGRAPH pra montar o grafo e ordenar topológicamente (usa o algoritmo de Kahn)
 
-    // Resolve a ordem topológica usando JGraphT (usando o algoritmo de Kahn!!)
     public List<NoCalculo> resolverOrdemExecucao(List<NoCalculo> nos) {
         Graph<NoCalculo, DefaultEdge> grafo = new DefaultDirectedGraph<>(DefaultEdge.class);
 
@@ -75,18 +99,17 @@ public class MotorCalculo {
         return ordemTopologica;
     }
 
-    // Executa o motor por colaborador
+
+    // calcula
     public void executar(List<NoCalculo> ordemExecucao, Map<String, Object> entradas, String nomeColaborador) {
         System.out.println("==================================================");
         System.out.println("  EXECUTANDO FOLHA DE: " + nomeColaborador.toUpperCase());
         System.out.println("==================================================");
 
+        // contexto do SPEL, funciona como uma mesa de trabalho que
+        // guarda os valores em memória pro spel usar nas expressões
         StandardEvaluationContext context = new StandardEvaluationContext();
-
-        // Injeta dados contratuais de entrada
         entradas.forEach(context::setVariable);
-
-        // Injeta serviços auxiliares (como tabelas de impostos complexas ou faixas)
         context.setVariable("tabelaImposto", new TabelaImpostoService());
 
         List<String> holerite = new ArrayList<>();
@@ -99,11 +122,8 @@ public class MotorCalculo {
                 continue;
             }
 
-            // Avalia a expressão SpEL com base no contexto acumulado
             Object resultado = no.getExpressaoSpel().getValue(context);
             no.setValorSaida(resultado);
-
-            // Disponibiliza o resultado atualizado para os próximos nós da fila salvando no contexto do SPEL
             context.setVariable(no.getNomeVariavel(), resultado);
 
             System.out.printf("[CALCULADO]    %-22s = %.2f%n", no.getNomeVariavel(), ((Number) resultado).doubleValue());
